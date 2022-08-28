@@ -48,12 +48,17 @@ func main() {
 	maxSize := flag.Int("size", 5, "max size log file in MB")
 	backups := flag.Int("backups", 10, "backups is the maximum number of old log files to retain")
 	age := flag.Int("age", 30, "age is the maximum number of days to retain old log files")
+	certFile := flag.String("cert", "localhost.crt", "path to server certificate")
+	key := flag.String("key", "localhost.key", "path to server certificate key")
+
 	SetupLogger(*maxSize, *backups, *age)
 
 	httpServerExitDone := &sync.WaitGroup{}
 
 	httpServerExitDone.Add(1)
 	server := startHttpServer(httpServerExitDone)
+	httpServerExitDone.Add(1)
+	serverSSL := startHttpsServer(httpServerExitDone, *certFile, *key)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
@@ -64,14 +69,17 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		panic(err)
 	}
+	if err := serverSSL.Shutdown(ctx); err != nil {
+		panic(err)
+	}
 	httpServerExitDone.Wait()
 
 	fmt.Println("server ending work")
 }
 
-func startHttpServer(wg *sync.WaitGroup) *http.Server {
+func startHttpsServer(wg *sync.WaitGroup, certFile string, key string) *http.Server {
 	r := chi.NewRouter()
-	srv := &http.Server{Addr: ":8080", Handler: r}
+	srvSSL := &http.Server{Addr: ":8085", Handler: r}
 
 	r.Use(middleware.Logger)
 
@@ -84,12 +92,35 @@ func startHttpServer(wg *sync.WaitGroup) *http.Server {
 	go func() {
 		defer wg.Done()
 
-		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		if err := srvSSL.ListenAndServeTLS(certFile, key); err != http.ErrServerClosed {
 			log.Fatalf("ListenAndServe(): %v", err)
 		}
 	}()
 
-	return srv
+	return srvSSL
+}
+
+func startHttpServer(wg *sync.WaitGroup) *http.Server {
+	r := chi.NewRouter()
+	srvNoSSL := &http.Server{Addr: ":8080", Handler: r}
+
+	r.Use(middleware.Logger)
+
+	staticFiles := http.FileServer(http.Dir("./public"))
+
+	r.Get("/hello/{status}", hello)
+	r.Post("/upload", uploadFile)
+	r.Handle("/", staticFiles)
+
+	go func() {
+		defer wg.Done()
+
+		if err := srvNoSSL.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatalf("ListenAndServe(): %v", err)
+		}
+	}()
+
+	return srvNoSSL
 }
 
 func hello(w http.ResponseWriter, r *http.Request) {
